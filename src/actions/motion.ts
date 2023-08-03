@@ -29,6 +29,7 @@ import { SearchDirection } from '../vimscript/pattern';
 import { SmartQuoteMatcher, WhichQuotes } from './plugins/targets/smartQuotesMatcher';
 import { useSmartQuotes } from './plugins/targets/targetsConfig';
 import { ModeDataFor } from '../mode/modeData';
+import { Range } from 'vscode';
 
 /**
  * A movement is something like 'h', 'k', 'w', 'b', 'gg', etc.
@@ -1819,6 +1820,98 @@ class MoveToMatchingBracket extends BaseMovement {
       return super.execActionWithCount(position, vimState, count);
     }
   }
+}
+
+export abstract class TargetAction extends ExpandingSelection {
+  override modes = [Mode.Normal, Mode.Visual, Mode.VisualLine, Mode.VisualBlock];
+
+  /** True for "around" actions, such as `a(`, and false for "inside" actions, such as `i(`  */
+  protected includeSurrounding = false;
+  override isJump = true;
+
+  public override async execAction(
+    position: Position,
+    vimState: VimState,
+    firstIteration: boolean,
+    lastIteration: boolean
+  ): Promise<IMovement> {
+    let minRange: Range = vimState.document.validateRange(
+      new Range(0, 0, Number.MAX_VALUE, Number.MAX_VALUE)
+    );
+    const currentStartPosition = vimState.cursorStartPosition;
+    for (const openChar of ['(', '{', '<', '[', "'", '"', '`']) {
+      const closingChar = PairMatcher.pairings[openChar].match;
+      const [selStart, selEnd] = sorted(currentStartPosition, position);
+
+      // First, search backwards for the opening character of the sequence
+      let openPos = PairMatcher.nextPairedChar(selStart, closingChar, vimState, true);
+      if (openPos === undefined) continue;
+
+      // Next, search forwards for the closing character which matches
+      let closePos = PairMatcher.nextPairedChar(openPos, openChar, vimState, true);
+      if (closePos === undefined) continue;
+
+      if (
+        !this.includeSurrounding &&
+        (isVisualMode(vimState.currentMode) || !firstIteration) &&
+        selStart.getLeftThroughLineBreaks(false).isBeforeOrEqual(openPos) &&
+        selEnd.getRightThroughLineBreaks(false).isAfterOrEqual(closePos)
+      ) {
+        // Special case: inner, with all inner content already selected
+        const outerOpenPos = PairMatcher.nextPairedChar(openPos, closingChar, vimState, false);
+        const outerClosePos = outerOpenPos
+          ? PairMatcher.nextPairedChar(outerOpenPos, openChar, vimState, false)
+          : undefined;
+
+        if (outerOpenPos && outerClosePos) {
+          openPos = outerOpenPos;
+          closePos = outerClosePos;
+        }
+      }
+
+      if (this.includeSurrounding) {
+        if (vimState.currentMode !== Mode.Visual) {
+          closePos = new Position(closePos.line, closePos.character + 1);
+        }
+      } else {
+        openPos = openPos.getRightThroughLineBreaks();
+        // If the closing character is the first on the line, don't swallow it.
+        if (closePos.isInLeadingWhitespace(vimState.document)) {
+          closePos = closePos.getLineBegin();
+        }
+
+        if (vimState.currentMode === Mode.Visual) {
+          closePos = closePos.getLeftThroughLineBreaks();
+        }
+      }
+
+      if (lastIteration && !isVisualMode(vimState.currentMode) && selStart.isBefore(openPos)) {
+        vimState.recordedState.operatorPositionDiff = openPos.subtract(selStart);
+      }
+      const curRange = new Range(openPos, closePos);
+      if (minRange.contains(curRange)) {
+        minRange = curRange;
+      }
+    }
+
+    // TODO: setting the cursor manually like this shouldn't be necessary (probably a Cursor, not Position, should be passed to `exec`)
+    vimState.cursorStartPosition = minRange.start;
+    return {
+      start: minRange.start,
+      stop: minRange.end,
+    };
+  }
+}
+
+@RegisterAction
+export class InnerTargetAction extends TargetAction {
+  keys = ['q'];
+  override includeSurrounding = false;
+}
+@RegisterAction
+export class OuterTargetAction extends TargetAction {
+  keys = [['a', 'q']];
+  override includeSurrounding = true;
 }
 
 export abstract class MoveInsideCharacter extends ExpandingSelection {
