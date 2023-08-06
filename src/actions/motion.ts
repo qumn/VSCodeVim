@@ -1824,6 +1824,7 @@ class MoveToMatchingBracket extends BaseMovement {
 
 export abstract class TargetAction extends ExpandingSelection {
   override modes = [Mode.Normal, Mode.Visual, Mode.VisualLine, Mode.VisualBlock];
+  readonly which: WhichQuotes = 'current';
 
   /** True for "around" actions, such as `a(`, and false for "inside" actions, such as `i(`  */
   protected includeSurrounding = false;
@@ -1835,11 +1836,12 @@ export abstract class TargetAction extends ExpandingSelection {
     firstIteration: boolean,
     lastIteration: boolean
   ): Promise<IMovement> {
-    let minRange: Range = vimState.document.validateRange(
+    const maxRange = vimState.document.validateRange(
       new Range(0, 0, Number.MAX_VALUE, Number.MAX_VALUE)
     );
+    let minRange: Range = maxRange;
     const currentStartPosition = vimState.cursorStartPosition;
-    for (const openChar of ['(', '{', '<', '[', "'", '"', '`']) {
+    for (const openChar of ['(', '{', '<', '[']) {
       const closingChar = PairMatcher.pairings[openChar].match;
       const [selStart, selEnd] = sorted(currentStartPosition, position);
 
@@ -1892,6 +1894,22 @@ export abstract class TargetAction extends ExpandingSelection {
       if (minRange.contains(curRange)) {
         minRange = curRange;
       }
+    }
+
+    const quoteMatcher = new SmartQuoteMatcher('any', vimState.document);
+    let res = quoteMatcher.smartSurroundingQuotes(position, this.which);
+    if (res && !this.includeSurrounding) {
+      res.start = res.start.translate({ characterDelta: 1 });
+      // res.stop = res.stop.translate({ characterDelta: -1 });
+    }
+    if (res) {
+      const quoteRange = new Range(res.start, res.stop);
+      if (minRange === maxRange) minRange = quoteRange;
+      if (quoteRange.contains(vimState.cursorStartPosition) && minRange.contains(quoteRange))
+        minRange = quoteRange;
+    }
+    if(minRange == maxRange) {
+      return failedMovement(vimState)
     }
 
     // TODO: setting the cursor manually like this shouldn't be necessary (probably a Cursor, not Position, should be passed to `exec`)
